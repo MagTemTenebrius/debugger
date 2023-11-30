@@ -9,8 +9,8 @@
 
 #include <string.h>
 
-#include "debugger.h"
 #include "disas.h"
+#include "debugger.h"
 
 //***************************************************************
 

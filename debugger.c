@@ -11,8 +11,9 @@
 
 #include <stdio.h>
 
-#include "debugger.h"
 #include "disas.h"
+#include "debugger.h"
+#include "string_util.h"
 
 
 //***************************************************************
@@ -81,12 +82,34 @@ typedef struct _DebuggerState {
 
 } DebuggerState;
 
+// Заводим своб структуру библиотеки
+
+typedef struct _Library {
+    WCHAR* libName;
+    DWORD64 libPid;
+    DWORD libTid;
+    LPVOID libAddr;
+    struct _Library* nextLib; // Будет односвязный список, это указатель на след. библиотеку
+} Library;
+
+// Поток
+
+typedef struct _Thread {
+    DWORD64 thPID;
+    DWORD64 thID;
+    LPTHREAD_START_ROUTINE thAddr;
+    struct _Thread* nextTh;
+} Thread;
 
 //***************************************************************
 
 
 DebuggerState glDebugger;
 
+// Заводим свой список библиотек
+Library* libraryes = NULL;
+// Заводим свой список потоков
+Thread* threads = NULL;
 
 //***************************************************************
 
@@ -433,6 +456,28 @@ void EventExitProcess (DWORD pid, DWORD tid, LPEXIT_PROCESS_DEBUG_INFO procDebug
 void EventCreateThread (DWORD pid, DWORD tid, LPCREATE_THREAD_DEBUG_INFO threadDebugInfo) {
 
     printf ("Create thread %d(%d) start: %p\n", pid, tid, threadDebugInfo->lpStartAddress);
+
+    Thread* thread;
+    Thread* currentThr;
+
+    DWORD64 thPID;
+    DWORD64 thID;
+    LPTHREAD_START_ROUTINE thAddr;
+
+    thread = (Library*)malloc(sizeof(Thread));
+    thread->thID = pid;
+    thread->thPID = tid;
+    thread->thAddr = threadDebugInfo->lpStartAddress;
+    thread->nextTh = 0;
+
+    if (threads == NULL) { // Создаем голову, если не было еще библиотек
+        threads = thread;
+    }
+    else { // Добавляем в конец списка
+        for (currentThr = threads; currentThr->nextTh != 0; currentThr = currentThr->nextTh);
+        currentThr->nextTh = thread;
+    }
+
     return;
 }
 
@@ -445,7 +490,16 @@ void EventCreateThread (DWORD pid, DWORD tid, LPCREATE_THREAD_DEBUG_INFO threadD
 //
 void EventExitThread (DWORD pid, DWORD tid, LPEXIT_THREAD_DEBUG_INFO threadDebugInfo) {
 
-    printf ("Exit thread %d(%d) code: %d\n", pid, tid, threadDebugInfo->dwExitCode);
+    printf("Exit thread %d(%d) code: %d\n", pid, tid, threadDebugInfo->dwExitCode);
+
+    Thread* currentTh;
+    Thread* selectTh;
+    for (currentTh = threads; currentTh != NULL && currentTh->nextTh != 0 && (currentTh->nextTh->thID != tid || currentTh->nextTh->thPID != pid); currentTh = currentTh->nextTh);
+    if (currentTh != NULL && currentTh->nextTh != 0 && ((currentTh->nextTh))->thID == tid && currentTh->nextTh->thPID == pid) {
+        selectTh = currentTh->nextTh;
+        currentTh->nextTh = selectTh->nextTh;
+        free(currentTh);
+    }
     return;
 }
 
@@ -457,8 +511,30 @@ void EventExitThread (DWORD pid, DWORD tid, LPEXIT_THREAD_DEBUG_INFO threadDebug
 // Обработчик событий загрузки библиотек.
 //
 void EventLoadDll (DWORD pid, DWORD tid, LPLOAD_DLL_DEBUG_INFO dllDebugInfo) {
+    printf ("Load DLL %d(%d) %p %s\n", pid, tid, dllDebugInfo->lpBaseOfDll, GetStringFromHandle(dllDebugInfo->hFile));
+    // Добавляем библиотеку в наш список библиотек
+    WCHAR * libName = GetStringFromHandle(dllDebugInfo->hFile);
+    DWORD64 libPid = pid;
+    DWORD libTid = tid;
+    LPVOID libAddr = dllDebugInfo->lpBaseOfDll;
+    Library* library;
+    Library* currentLib;
 
-    printf ("Load DLL %d(%d) %p\n", pid, tid, dllDebugInfo->lpBaseOfDll);
+    library = (Library*)malloc(sizeof(Library));
+    library->libName = libName;
+    library->libPid = libPid;
+    library->libTid = libTid;
+    library->libAddr = libAddr;
+    library->nextLib = 0;
+
+    if (libraryes == NULL) { // Создаем голову, если не было еще библиотек
+        libraryes = library;
+    } 
+    else { // Добавляем в конец списка
+        for (currentLib = libraryes; currentLib->nextLib != 0; currentLib = currentLib->nextLib);
+        currentLib->nextLib = library;
+    }
+
     return;
 }
 
@@ -469,8 +545,16 @@ void EventLoadDll (DWORD pid, DWORD tid, LPLOAD_DLL_DEBUG_INFO dllDebugInfo) {
 // Обработчик событий выгрузки библиотек.
 //
 void EventUnloadDll (DWORD pid, DWORD tid, LPUNLOAD_DLL_DEBUG_INFO dllDebugInfo) {
+    Library* currentLib;
+    Library* selectLib;
 
     printf ("Unload DLL %d(%d)  %p\n", pid, tid, dllDebugInfo->lpBaseOfDll);
+    for (currentLib = libraryes; currentLib!= NULL && currentLib->nextLib != 0 && currentLib->nextLib->libAddr != dllDebugInfo->lpBaseOfDll; currentLib = currentLib->nextLib);
+    if (currentLib != NULL && currentLib->nextLib->libAddr == dllDebugInfo->lpBaseOfDll) {
+        selectLib = currentLib->nextLib;
+        currentLib->nextLib = selectLib->nextLib;
+        free(selectLib);
+    }
     return;
 }
 
@@ -497,7 +581,10 @@ void RequestAction (void) {
 
 DebuggerState *debugger = &glDebugger;
 char ans[100];
+char response[1024];
 BOOL isRet = FALSE;
+Library* currentLib;
+Thread* currentTh;
 
     // если до этого выбрали одно из перманентных действий
     if (debugger->isRun) {
@@ -535,6 +622,32 @@ BOOL isRet = FALSE;
                 isRet = TRUE;
                 break;
 
+            // Добавляем возможность просмотра списка библиотек и потоков
+            case 'l':
+            case 'L':
+                if (ans[1] == 'l' || ans[1] == 'L') {
+                    puts("Libs:\n");
+                    for (currentLib = libraryes; currentLib != 0; currentLib = currentLib->nextLib) {
+                        sprintf(response, "PID: %d;\tTID:%d;\tADDR: %x;\tName: %s\n", currentLib->libPid, currentLib->libTid, currentLib->libAddr, currentLib->libName);
+                        puts(response);
+                    }
+                    
+                } 
+                else if (ans[1] == 't' || ans[1] == 'T') {
+                    // Список потоков
+                    puts("Threads:\n");
+                    for (currentTh = threads; currentTh != 0; currentTh = currentTh->nextTh) {
+                        sprintf(response, "ID: %d;\PID:%d;\tADDR: %x;\n", currentTh->thID, currentTh->thPID, currentTh->thAddr);
+                        puts(response);
+                    }
+                }
+                else {
+                    puts("Use L<L|T>.\n"
+                        "LL - List Library\n"
+                        "LT - List Thread\n");
+                }
+                break;
+
             case '?':
                 puts ("B - permanent soft breakpoint\n"
                       "b - once soft breakpoint\n"
@@ -542,7 +655,8 @@ BOOL isRet = FALSE;
                       "h - once soft breakpoint\n"
                       "T - permanent trap flag\n"
                       "t - once trap flag\n"
-                      "r - run\n");
+                      "r - run\n"
+                      "l<l|t> - list library or thread\n");
                 break;
 
             default:
