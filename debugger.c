@@ -9,11 +9,10 @@
 
 #include <windows.h>
 
-#include <stdio.h>
-
 #include "disas.h"
 #include "debugger.h"
 #include "string_util.h"
+#include "logger.h"
 
 
 //***************************************************************
@@ -38,6 +37,11 @@ typedef struct _BreakList {
 
     BreakEntry *first;
 } BreakList;
+
+typedef struct _Instruction {
+    unsigned int offset;
+    char* instruction;
+} Instruction;
 
 
 typedef struct _Dr7Reg {
@@ -111,6 +115,13 @@ Library* libraryes = NULL;
 // Заводим свой список потоков
 Thread* threads = NULL;
 
+// Логгер сообщений
+Logger* logger = NULL;
+
+// Какие инутрукции отлавливаем
+char *myInstructions[] = { "sub", "add", "xor", "or" , "and" };
+int instrCount = 5;
+
 //***************************************************************
 
 
@@ -123,12 +134,20 @@ STARTUPINFO startupInfo;
 PROCESS_INFORMATION procInfo;
 BOOL ret;
 DebuggerState *debugger = &glDebugger;
+char logName[100];
+
     
     RtlZeroMemory (&startupInfo, sizeof(startupInfo));
     RtlZeroMemory (&procInfo, sizeof(procInfo));
     startupInfo.cb = sizeof(startupInfo);
     startupInfo.dwFlags = STARTF_USESHOWWINDOW;
     startupInfo.wShowWindow = SW_SHOWNORMAL;
+
+
+    // Инициализируем наш логгер
+    //printf("AAAAAAAAAAAAAAAAAAAA\n");
+    sprintf(logName, "%s.txt", procName);
+    logger = initLog(logName);
     
     ret = CreateProcess (procName, 
                          NULL,
@@ -349,13 +368,16 @@ DebuggerState *debugger = &glDebugger;
 //
 // Дизассемблирует заданное количество инструкций по адресу.
 //
-unsigned int DisasDebugProcess (void *addr, DWORD instCount) {
+Instruction* DisasDebugProcess (void *addr, DWORD instCount) {
+    Instruction* result = malloc(sizeof(Instruction));
 
 DWORD size = 15 * instCount;
 PBYTE buf = malloc (size);
 unsigned int i;
 unsigned int offset = 0;
+unsigned strLen = 0;
 DebuggerState *debugger = &glDebugger;
+byte flag = 0;
 
     if (!buf) {
         return 0;
@@ -370,11 +392,39 @@ DebuggerState *debugger = &glDebugger;
         if (!len) {
             break;
             }
-        printf ("%p: %-16s %s\n", (UINT_PTR)addr + offset, hexBuf, asmBuf);
+        strLen = printf ("%p: %-16s %s\n", (UINT_PTR)addr + offset, hexBuf, asmBuf);
+        // Первую инструкцию добавляемв список.
+        if (instCount == 1) {
+            result->instruction = 0;
+            for (int j = 0; j < instrCount; j++) {
+                flag = 0;
+                for (int k = 0; k < strlen(myInstructions[j]); k++) {
+                    if (strlen(asmBuf) <= k) {
+                        flag = 0;
+                        break;
+                    }
+                    if (asmBuf[k] != myInstructions[j][k]) {
+                        flag = 0; 
+                        break;
+                    }
+                    else {
+                        flag = 1;
+                    }
+                }
+            }
+            if (flag) {
+                result->instruction = (char*)malloc(sizeof(char) * (strLen + 1));
+                sprintf(result->instruction, "%p: %-16s %s\n", (UINT_PTR)addr + offset, hexBuf, asmBuf);
+            }
+            else {
+                result->instruction = 0;
+            }
+        }
         offset += len;
         }
+    result->offset = offset;
 
-    return offset;
+    return result;
 }
 
 
@@ -384,19 +434,41 @@ DebuggerState *debugger = &glDebugger;
 //
 // Выводит содержимое регистров.
 //
-void DumpRegisterContext (CONTEXT *context) {
+char * DumpRegisterContext (CONTEXT *context) {
 
 char *flags1 = "C P A ZSTIDO";
 char *flags2 = "c p a zstido";
 unsigned int i;
+char* result;
+int sizeResult = 0;
 
 #ifndef _AMD64_
-    printf ("eax = %08X  ebx = %08X  ecx = %08X edx = %08X\n", context->Eax, context->Ebx, context->Ecx, context->Edx);
-    printf ("edi = %08X  esi = %08X  ebp = %08X esp = %08X\n", context->Edi, context->Esi, context->Ebp, context->Esp);
+DWORD   Eax = context->Eax;
+DWORD   Ebx = context->Ebx;
+DWORD   Ecx = context->Ecx;
+DWORD   Edx = context->Edx;
+DWORD   Edi = context->Edi;
+DWORD   Esi = context->Esi;
+DWORD   Ebp = context->Ebp;
+DWORD   Esp = context->Esp;
+    sizeResult += printf ("eax = %08X  ebx = %08X  ecx = %08X edx = %08X\n", Eax, Ebx, Ecx, Edx);
+    sizeResult += printf ("edi = %08X  esi = %08X  ebp = %08X esp = %08X\n", Edi, Esi, Ebp, Esp);
+    result = (char*)malloc(sizeof(char) * sizeResult + 1);
+    sprintf(result, "rax = %08X  rbx = %08X  rcx = %08X rdx = %08X rdi = %08X  rsi = %08X  rbp = %08X rsp = %08X\n", Eax, Ebx, Ecx, Edx, Edi, Esi, Ebp, Esp);
     printf ("eflags = %08X\t", context->EFlags);
 #else   // _AMD64_
-    printf ("rax = %016X  rbx = %016X  rcx = %016X rdx = %016X\n", context->Rax, context->Rbx, context->Rcx, context->Rdx);
-    printf ("rdi = %016X  rsi = %016X  rbp = %016X rsp = %016X\n", context->Rdi, context->Rsi, context->Rbp, context->Rsp);
+DWORD64 Rax = context->Rax;
+DWORD64 Rbx = context->Rbx;
+DWORD64 Rcx = context->Rcx;
+DWORD64 Rdx = context->Rdx;
+DWORD64 Rdi = context->Rdi;
+DWORD64 Rsi = context->Rsi;
+DWORD64 Rbp = context->Rbp;
+DWORD64 Rsp = context->Rsp;
+    sizeResult += printf ("rax = %016X  rbx = %016X  rcx = %016X rdx = %016X\n", Rax, Rbx, Rcx, Rdx);
+    sizeResult += printf ("rdi = %016X  rsi = %016X  rbp = %016X rsp = %016X\n", Rdi, Rsi, Rbp, Rsp);
+    result = (char*)malloc(sizeof(char) * sizeResult + 1);
+    sprintf(result, "rax = %016X  rbx = %016X  rcx = %016X rdx = %016X rdi = %016X  rsi = %016X  rbp = %016X rsp = %016X\n", Rax, Rbx, Rcx, Rdx, Rdi, Rsi, Rbp, Rsp);
     printf ("eflags = %08X\t", context->EFlags);
 #endif  // _AMD64_
 
@@ -410,7 +482,7 @@ unsigned int i;
         }
     printf ("\n\n");
 
-    return;
+    return result;
 }
 
 //--------------------
@@ -464,7 +536,7 @@ void EventCreateThread (DWORD pid, DWORD tid, LPCREATE_THREAD_DEBUG_INFO threadD
     DWORD64 thID;
     LPTHREAD_START_ROUTINE thAddr;
 
-    thread = (Library*)malloc(sizeof(Thread));
+    thread = (Thread*)malloc(sizeof(Thread));
     thread->thID = pid;
     thread->thPID = tid;
     thread->thAddr = threadDebugInfo->lpStartAddress;
@@ -683,6 +755,7 @@ BreakEntry *breakEntry;
 HANDLE thread;
 unsigned int instSize;
 CONTEXT context;
+Instruction* instr;
 
     breakEntry = FindBreakByAddr (&debugger->breakpointList, exceptionAddr);
 
@@ -697,7 +770,9 @@ CONTEXT context;
         DeleteBreakpoint (tid, exceptionAddr);
         }
 
-    instSize = DisasDebugProcess ((PVOID)exceptionAddr, 1);
+    instr = DisasDebugProcess ((PVOID)exceptionAddr, 1);
+    instSize = instr->offset;
+
 
     thread = OpenThread (THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
     if (thread != INVALID_HANDLE_VALUE) {
@@ -716,7 +791,13 @@ CONTEXT context;
                 }
             }
         }
-	DumpRegisterContext (&context);
+	// DumpRegisterContext (&context);
+
+    if (instr->instruction != 0) {
+        writeLog(logger, instr->instruction);
+        writeLog(logger, DumpRegisterContext(&context));
+    }
+    
 
     // запрашиваем дальнейшее действие
     RequestAction();
